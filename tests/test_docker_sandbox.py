@@ -207,7 +207,7 @@ def test_execute_wraps_command_and_returns_output(
         assert "hello" in result.output
 
         exec_args = run_docker.call_args_list[1][0][0]
-        assert exec_args[0] == "exec"
+        assert exec_args[:4] == ["exec", "-w", "/workspace", sandbox._container_name]
         shell_cmd = exec_args[-1]
         assert shell_cmd.startswith("cd /workspace && ")
         assert "echo hello" in shell_cmd

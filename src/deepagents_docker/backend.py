@@ -25,18 +25,7 @@ CONTAINER_WORKDIR = "/workspace"
 
 
 class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
-    """Filesystem backend with shell commands executed inside a Docker container.
-
-    File operations (`ls`, `read`, `write`, `edit`, `grep`, `glob`) run against a
-    dedicated workspace directory on the host via `FilesystemBackend` with
-    `virtual_mode=True`. The same directory is bind-mounted into the container at
-    `/workspace`, and the `execute` tool runs commands there with Docker resource
-    and security limits.
-
-    This is defense in depth, not a perfect isolation boundary. Do not mount
-    secrets into the workspace, keep Docker patched, and prefer microVMs for
-    hostile multi-tenant workloads.
-    """
+    """Docker-backed sandbox backend for DeepAgents."""
 
     def __init__(
         self,
@@ -46,8 +35,8 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
         workspace_dir: str | Path | None = None,
         timeout: int = DEFAULT_EXECUTE_TIMEOUT,
         max_output_bytes: int = 100_000,
-        memory: str = "512m",
-        cpus: float = 1.0,
+        memory: str = "256m",
+        cpus: float = 0.5,
         pids_limit: int = 128,
         auto_remove: bool = True,
         extra_run_args: list[str] | None = None,
@@ -61,7 +50,7 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
                 created when omitted.
             timeout: Default command timeout in seconds.
             max_output_bytes: Maximum combined stdout/stderr captured per command.
-            memory: Docker memory limit (for example ``"512m"``).
+            memory: Docker memory limit (for example ``"256m"``).
             cpus: Docker CPU limit.
             pids_limit: Maximum number of PIDs inside the container.
             auto_remove: Remove the container on ``close()``.
@@ -145,9 +134,9 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
             "ALL",
             "--read-only",
             "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=64m",
+            "/tmp:rw,noexec,nosuid,size=512m",
             "--tmpfs",
-            "/var/tmp:rw,noexec,nosuid,size=64m",
+            "/var/tmp:rw,noexec,nosuid,size=512m",
             "-v",
             f"{self._workspace}:{CONTAINER_WORKDIR}:rw",
             "-w",
@@ -197,6 +186,8 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
         wrapped = self._wrap_command(command)
         docker_args = [
             "exec",
+            "-w",
+            CONTAINER_WORKDIR,
             self._container_name,
             "sh",
             "-c",
