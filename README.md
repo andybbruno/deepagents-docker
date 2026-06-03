@@ -112,6 +112,10 @@ uv sync
 uv run pytest
 ```
 
+## Contributing
+
+Contributions are welcome! Please feel free to open an issue or submit a pull request.
+
 ## Security
 
 Use this for trusted workloads and development, not as a hard multi-tenant boundary. Do not put secrets in the workspace. See [Deep Agents security](https://github.com/langchain-ai/deepagents?tab=security-ov-file).
