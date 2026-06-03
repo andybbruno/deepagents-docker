@@ -14,6 +14,9 @@
 
 </div>
 
+## DeepAgents
+
+Let your agents run commands in a Docker container, with a dedicated workspace directory and resource limits.
 
 ## Quickstart
 
