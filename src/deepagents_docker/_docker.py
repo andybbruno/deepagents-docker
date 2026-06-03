@@ -7,9 +7,7 @@ import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-
-class DockerError(RuntimeError):
-    """Raised when a Docker CLI invocation fails."""
+from .errors import DockerError
 
 
 @dataclass(frozen=True)

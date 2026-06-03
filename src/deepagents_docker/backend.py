@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import atexit
 import shlex
-import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -12,13 +11,13 @@ from pathlib import Path
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
 
-from deepagents_docker._docker import (
-    DockerError,
+from ._docker import (
     docker_available,
     format_docker_error,
     inspect_container_id,
     run_docker,
 )
+from .errors import DockerError
 
 DEFAULT_EXECUTE_TIMEOUT = 120
 DEFAULT_IMAGE = "python:3.12-bookworm"
@@ -57,6 +56,7 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
 
         Args:
             image: Docker image for command execution (default: official ``python:3.12-bookworm``).
+            allow_outbound_traffic: Allow/deny outbound network traffic (default: allow).
             workspace_dir: Host directory for agent files. A temporary directory is
                 created when omitted.
             timeout: Default command timeout in seconds.
@@ -64,7 +64,6 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
             memory: Docker memory limit (for example ``"512m"``).
             cpus: Docker CPU limit.
             pids_limit: Maximum number of PIDs inside the container.
-            outbound_traffic: Allow/deny outbound network traffic (default: allow).
             auto_remove: Remove the container on ``close()``.
             extra_run_args: Additional ``docker run`` flags appended before the image.
         """
@@ -205,34 +204,32 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
         ]
 
         try:
-            completed = subprocess.run(  # noqa: S602
-                ["docker", *docker_args],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=effective_timeout,
-            )
-        except subprocess.TimeoutExpired:
-            if timeout is not None:
-                msg = (
-                    f"Error: Command timed out after {effective_timeout} seconds "
-                    "(custom timeout). The command may be stuck or require more time."
+            completed = run_docker(docker_args, timeout=effective_timeout)
+        except DockerError as exc:
+            detail = str(exc)
+            if "timed out" in detail:
+                if timeout is not None:
+                    msg = (
+                        f"Error: Command timed out after {effective_timeout} seconds "
+                        "(custom timeout). The command may be stuck or require more time."
+                    )
+                else:
+                    msg = (
+                        f"Error: Command timed out after {effective_timeout} seconds. "
+                        "For long-running commands, re-run using the timeout parameter."
+                    )
+                return ExecuteResponse(output=msg, exit_code=124, truncated=False)
+            if "not found on PATH" in detail:
+                return ExecuteResponse(
+                    output=(
+                        "Error executing command (FileNotFoundError): "
+                        "docker executable not found on PATH"
+                    ),
+                    exit_code=1,
+                    truncated=False,
                 )
-            else:
-                msg = (
-                    f"Error: Command timed out after {effective_timeout} seconds. "
-                    "For long-running commands, re-run using the timeout parameter."
-                )
-            return ExecuteResponse(output=msg, exit_code=124, truncated=False)
-        except FileNotFoundError:
             return ExecuteResponse(
-                output="Error executing command (FileNotFoundError): docker executable not found on PATH",
-                exit_code=1,
-                truncated=False,
-            )
-        except Exception as exc:  # noqa: BLE001
-            return ExecuteResponse(
-                output=f"Error executing command ({type(exc).__name__}): {exc}",
+                output=f"Error executing command (DockerError): {exc}",
                 exit_code=1,
                 truncated=False,
             )
