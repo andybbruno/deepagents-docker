@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deepagents-docker"
-version = "0.0.2"
+version = "0.0.3"
 description = "Docker-backed sandbox backend for DeepAgents"
 readme = "README.md"
 license = "MIT"
