@@ -16,7 +16,7 @@
 
 ## DeepAgents
 
-Let your agents run commands in a Docker container, with a dedicated workspace directory and resource limits.
+Run [Deep Agents](https://github.com/langchain-ai/deepagents) in an isolated Docker container without compromising your host machine.
 
 ## Quickstart
 
