@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/deepagents-docker-banner.png"  width="800" />
+  <img src="https://github.com/andybbruno/deepagents-docker/blob/master/assets/deepagents-docker-banner.png?raw=true"  width="800" />
 </p>
 <div align="center">
   <h3>Docker sandbox backend for <a href="https://github.com/langchain-ai/deepagents">Deep Agents</a>.</h3>
