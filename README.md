@@ -14,8 +14,7 @@
 
 </div>
 
-## DeepAgents
-
+## deepagents-docker
 Run [Deep Agents](https://github.com/langchain-ai/deepagents) in an isolated Docker container without compromising your host machine.
 
 ## Quickstart
