@@ -90,7 +90,20 @@ with DockerSandbox() as backend:
 print("Done!")
 ```
 
-## Example
+## Examples
+
+Prerequisites:
+- An OpenAI API key
+- Docker installed and running
+- Python 3.12 or higher
+
+Set the OpenAI API key:
+
+```bash
+export OPENAI_API_KEY=your_api_key
+```
+
+### 1. Pizza agent
 
 The [pizza agent](examples/pizza_agent.py) searches the web for a Neapolitan pizza recipe and writes it to a file in the shared folder:
 
@@ -119,13 +132,43 @@ for step in agent.stream(
                 message.pretty_print()
 ```
 
-From a clone of this repo (requires an OpenAI API key):
+The agent writes `recipe.md` under `examples/data/`.
 
-```bash
-uv run python examples/pizza_agent.py
+### 2. Sales analyst
+
+The [sales analyst](examples/sales_analyst.py) reads `sales.csv` from the shared folder, installs Python packages inside the container as needed (for example `pandas`, `matplotlib`), runs an analysis script, and writes a markdown report with charts:
+
+```python
+from deepagents import create_deep_agent
+from deepagents_docker import DockerSandbox
+
+backend = DockerSandbox(
+    shared_dir="examples/data",
+    allow_outbound_traffic=True,
+)
+
+agent = create_deep_agent(
+    model="openai:gpt-5.5",
+    backend=backend,
+    system_prompt="You are a sales analyst assistant.",
+)
+
+for step in agent.stream(
+    {
+        "messages": (
+            'Analyze the "sales.csv" data and write a report (with charts) into '
+            'a file called "sales_report.md". Put images in an "img" directory.'
+        )
+    },
+    stream_mode="updates",
+):
+    for update in step.values():
+        if update and (messages := update.get("messages")):
+            for message in messages:
+                message.pretty_print()
 ```
 
-The agent writes `recipe.md` under `examples/data/`.
+The agent writes `sales_report.md` and chart images under `examples/data/img/`.
 
 ## Development
 
