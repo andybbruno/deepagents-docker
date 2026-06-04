@@ -71,9 +71,6 @@ DockerSandbox(
 The creation of a `DockerSandbox` object results in the starting of a long-running docker container. Every shell command executed by the agent is actually run **inside the container**, not on your host OS. Therefore, library installations, cURL downloads, and any other filesystem changes stay inside Docker, not on your host. The only link between the container and your machine is **shared_dir** (if provided), a folder on disk that is mounted at `/shared` (with that directory as the shell working directory) so you can share files between the agent and your host.
 
 > [!NOTE]
-> Docker does not allow bind-mounting a volume to `/` (it would hide the image’s system files and break the container). File tools (`read_file`, `write_file`, …) use virtual paths under `/` (for example `/sales.csv`); shell commands run in `/shared`, so the same file is `sales.csv` or `/shared/sales.csv` in the container.
-
-> [!NOTE]
 > The container is stopped and removed automatically when the Python process exits (`atexit`). Use a context manager (below) to tear down earlier.
 
 
