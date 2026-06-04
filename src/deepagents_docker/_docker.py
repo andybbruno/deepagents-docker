@@ -1,7 +1,3 @@
-"""Low-level helpers for invoking the Docker CLI."""
-
-from __future__ import annotations
-
 import json
 import subprocess
 from collections.abc import Sequence
@@ -53,17 +49,6 @@ def docker_available() -> bool:
     """Return True when the Docker daemon responds to `docker info`."""
     result = run_docker(["info", "--format", "{{.ServerVersion}}"])
     return result.returncode == 0
-
-
-def inspect_container_id(container_name: str) -> str:
-    """Return the container ID for a running container name."""
-    result = run_docker(
-        ["inspect", "--format", "{{.Id}}", container_name],
-    )
-    if result.returncode != 0:
-        msg = result.stderr.strip() or f"failed to inspect container {container_name!r}"
-        raise DockerError(msg)
-    return result.stdout.strip()
 
 
 def format_docker_error(result: DockerRunResult) -> str:

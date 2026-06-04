@@ -1,7 +1,3 @@
-"""Unit tests for low-level Docker CLI helpers."""
-
-from __future__ import annotations
-
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -11,7 +7,6 @@ from deepagents_docker._docker import (
     DockerRunResult,
     docker_available,
     format_docker_error,
-    inspect_container_id,
     run_docker,
 )
 from deepagents_docker.errors import DockerError
@@ -52,26 +47,6 @@ def test_docker_available_true_when_info_succeeds(run_docker: MagicMock) -> None
 def test_docker_available_false_when_info_fails(run_docker: MagicMock) -> None:
     run_docker.return_value = DockerRunResult(returncode=1, stdout="", stderr="daemon down")
     assert docker_available() is False
-
-
-@patch("deepagents_docker._docker.run_docker")
-def test_inspect_container_id_returns_stdout(run_docker: MagicMock) -> None:
-    run_docker.return_value = DockerRunResult(returncode=0, stdout="abc123\n", stderr="")
-    assert inspect_container_id("my-container") == "abc123"
-
-
-@patch("deepagents_docker._docker.run_docker")
-def test_inspect_container_id_raises_on_failure(run_docker: MagicMock) -> None:
-    run_docker.return_value = DockerRunResult(returncode=1, stdout="", stderr="no such object")
-    with pytest.raises(DockerError, match="no such object"):
-        inspect_container_id("missing")
-
-
-@patch("deepagents_docker._docker.run_docker")
-def test_inspect_container_id_fallback_message(run_docker: MagicMock) -> None:
-    run_docker.return_value = DockerRunResult(returncode=1, stdout="", stderr="")
-    with pytest.raises(DockerError, match="failed to inspect container 'missing'"):
-        inspect_container_id("missing")
 
 
 @patch("deepagents_docker._docker.subprocess.run")
