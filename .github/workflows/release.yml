@@ -17,7 +17,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.ADMIN_RELEASE_TOKEN }}
 
       - name: Decide semver bump from PR branch name
         id: bump
