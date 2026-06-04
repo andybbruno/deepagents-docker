@@ -1,9 +1,6 @@
-"""DockerSandbox: isolated shell execution with host-backed workspace files."""
-
 from __future__ import annotations
 
 import atexit
-import shlex
 import tempfile
 import uuid
 from pathlib import Path
@@ -14,14 +11,13 @@ from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
 from ._docker import (
     docker_available,
     format_docker_error,
-    inspect_container_id,
     run_docker,
 )
 from .errors import DockerError
 
 DEFAULT_EXECUTE_TIMEOUT = 120
 DEFAULT_IMAGE = "python:3.12-bookworm"
-CONTAINER_WORKDIR = "/workspace"
+CONTAINER_WORKDIR = "/shared"
 
 
 class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
@@ -32,7 +28,7 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
         *,
         image: str = DEFAULT_IMAGE,
         allow_outbound_traffic: bool = True,
-        workspace_dir: str | Path | None = None,
+        shared_dir: str | Path | None = None,
         timeout: int = DEFAULT_EXECUTE_TIMEOUT,
         max_output_bytes: int = 100_000,
         memory: str = "256m",
@@ -41,12 +37,12 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
         auto_remove: bool = True,
         extra_run_args: list[str] | None = None,
     ) -> None:
-        """Create a sandbox container and workspace directory.
+        """Create a sandbox container and shared directory.
 
         Args:
             image: Docker image for command execution (default: official ``python:3.12-bookworm``).
             allow_outbound_traffic: Allow/deny outbound network traffic (default: allow).
-            workspace_dir: Host directory for agent files. A temporary directory is
+            shared_dir: Host directory shared with the container. A temporary directory is
                 created when omitted.
             timeout: Default command timeout in seconds.
             max_output_bytes: Maximum combined stdout/stderr captured per command.
@@ -66,19 +62,15 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
             msg = f"pids_limit must be positive, got {pids_limit}"
             raise ValueError(msg)
 
-        self._owns_workspace = workspace_dir is None
-        self._workspace = Path(
-            tempfile.mkdtemp(prefix="deepagents-docker-")
-            if workspace_dir is None
-            else workspace_dir,
+        self._owns_shared_dir = shared_dir is None
+        self._shared_dir = Path(
+            tempfile.mkdtemp(prefix="deepagents-docker-shared-")
+            if shared_dir is None
+            else shared_dir,
         ).resolve()
-        self._workspace.mkdir(parents=True, exist_ok=True)
+        self._shared_dir.mkdir(parents=True, exist_ok=True)
 
-        super().__init__(
-            root_dir=self._workspace,
-            virtual_mode=True,
-            max_file_size_mb=10,
-        )
+        super().__init__(root_dir=self._shared_dir, virtual_mode=True)
 
         self._image = image
         self._default_timeout = timeout
@@ -90,22 +82,22 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
         self._auto_remove = auto_remove
         self._extra_run_args = list(extra_run_args or [])
 
-        self._container_name = f"deepagents-docker-{uuid.uuid4().hex[:12]}"
-        self._container_id: str | None = None
+        self._container_id: str = f"{uuid.uuid4().hex[:12]}"
+        self._container_name = f"deepagents-docker-{self._container_id}"
         self._closed = False
 
         self._start_container()
         atexit.register(self.close)
 
     @property
-    def workspace_dir(self) -> Path:
-        """Host path backing the agent workspace."""
-        return self._workspace
+    def shared_dir(self) -> Path:
+        """Host path of the folder shared with the container."""
+        return self._shared_dir
 
     @property
     def id(self) -> str:
         """Unique identifier for this sandbox instance."""
-        return self._container_id or self._container_name
+        return self._container_id
 
     def _start_container(self) -> None:
         if not docker_available():
@@ -128,17 +120,8 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
             self._memory,
             "--pids-limit",
             str(self._pids_limit),
-            "--security-opt",
-            "no-new-privileges",
-            "--cap-drop",
-            "ALL",
-            "--read-only",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=512m",
-            "--tmpfs",
-            "/var/tmp:rw,noexec,nosuid,size=512m",
             "-v",
-            f"{self._workspace}:{CONTAINER_WORKDIR}:rw",
+            f"{self._shared_dir}:{CONTAINER_WORKDIR}:rw",
             "-w",
             CONTAINER_WORKDIR,
             *self._extra_run_args,
@@ -150,12 +133,6 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
         if result.returncode != 0:
             msg = format_docker_error(result)
             raise DockerError(f"failed to start sandbox container: {msg}")
-
-        self._container_id = inspect_container_id(self._container_name)
-
-    def _wrap_command(self, command: str) -> str:
-        """Run agent commands from the container workspace directory."""
-        return f"cd {shlex.quote(CONTAINER_WORKDIR)} && {command}"
 
     def execute(
         self,
@@ -183,15 +160,12 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
             msg = f"timeout must be positive, got {effective_timeout}"
             raise ValueError(msg)
 
-        wrapped = self._wrap_command(command)
         docker_args = [
             "exec",
-            "-w",
-            CONTAINER_WORKDIR,
             self._container_name,
             "sh",
             "-c",
-            wrapped,
+            command,
         ]
 
         try:
@@ -262,10 +236,10 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
         if self._auto_remove:
             run_docker(["rm", "-f", self._container_name], timeout=30)
 
-        if self._owns_workspace:
+        if self._owns_shared_dir:
             import shutil
 
-            shutil.rmtree(self._workspace, ignore_errors=True)
+            shutil.rmtree(self._shared_dir, ignore_errors=True)
 
     def __enter__(self) -> DockerSandbox:
         return self

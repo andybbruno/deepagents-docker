@@ -1,12 +1,17 @@
+"""
+
+This example agent finds the best neapolitan pizza recipe on the web and writes it to a file.
+
+"""
+
 from deepagents import create_deep_agent
 
 from deepagents_docker import DockerSandbox
 
 backend = DockerSandbox(
-    workspace_dir="examples/data",
+    shared_dir="examples/data",
     allow_outbound_traffic=True,
 )
-
 agent = create_deep_agent(
     model="openai:gpt-5.5",
     backend=backend,

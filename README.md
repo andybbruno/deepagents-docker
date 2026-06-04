@@ -45,17 +45,17 @@ result = agent.invoke({"messages": "Research the latest trends in AI and write a
 
 ## Configuration
 
-Constructor options let you change the image, workspace path, command timeout, resource limits, outbound network access, and any extra `docker run` flags:
+Constructor options let you change the docker image of the container, shared folder path, command timeout, resource limits, outbound network access, and any extra `docker run` flags:
 
 ```python
 DockerSandbox(
     image="python:3.12-bookworm",      # default image (Debian-based, includes curl, etc.)
     allow_outbound_traffic=True,       # False → no network; True (default) → allow outbound traffic
-    workspace_dir="/path/to/project",  # host dir for agent files; see note below
+    shared_dir="/path/to/project",     # host folder shared with the container; see note below
     timeout=120,                       # per-command timeout (seconds)
     max_output_bytes=100_000,          # combined stdout/stderr cap per command
-    memory="512m",
-    cpus=1.0,
+    memory="256m",                     # default memory limit
+    cpus=0.5,                          # default CPU limit
     pids_limit=128,
     auto_remove=True,                  # remove container on close()
     extra_run_args=["--env", "FOO=bar"],
@@ -63,24 +63,15 @@ DockerSandbox(
 ```
 
 > [!NOTE]
-> When `workspace_dir` is omitted, a temporary directory is created under the host temp folder and **removed on `close()`** when the sandbox owns it. Pass an explicit path to keep files after the container stops.
+> Pass an explicit `shared_dir` path to keep files after the container stops. When omitted, a temporary directory is created within the host filesystem and **removed when the DockerSandbox is closed**.
 
 
 ## How it works
 
-`DockerSandbox` implements the Deep Agents backend protocol by splitting work across the host and a container:
+The creation of a `DockerSandbox` object results in the starting of a long-running docker container. Every shell command executed by the agent is actually run **inside the container**, not on your host OS. Therefore, library installations, cURL downloads, and any other filesystem changes stay inside Docker, not on your host. The only link between the container and your machine is **shared_dir** (if provided), a folder on disk that is mounted at `/shared` (with that directory as the shell working directory) so you can share files between the agent and your host.
 
-- **File tools** (`read`, `write`, `edit`, `grep`, `glob`, `ls`) run against a workspace directory on your machine.
-- **`execute`** runs shell commands in a long-lived Docker container. The same directory is bind-mounted at `/workspace`, so files stay in sync between tools and commands.
-
-On startup, the sandbox creates a container with conservative defaults:
-
-- [`python:3.12-bookworm`](https://hub.docker.com/_/python) as the default image
-- Outbound traffic allowed by default
-- No elevated Linux privileges
-- Read-only root filesystem (with small `tmpfs` mounts for `/tmp` and `/var/tmp`)
-- Memory, CPU, and PID limits
-
+> [!NOTE]
+> Docker does not allow bind-mounting a volume to `/` (it would hide the image’s system files and break the container). File tools (`read_file`, `write_file`, …) use virtual paths under `/` (for example `/sales.csv`); shell commands run in `/shared`, so the same file is `sales.csv` or `/shared/sales.csv` in the container.
 
 > [!NOTE]
 > The container is stopped and removed automatically when the Python process exits (`atexit`). Use a context manager (below) to tear down earlier.
@@ -104,14 +95,14 @@ print("Done!")
 
 ## Example
 
-The [pizza agent](examples/pizza_agent.py) searches the web for a Neapolitan pizza recipe and writes it to a file in the workspace:
+The [pizza agent](examples/pizza_agent.py) searches the web for a Neapolitan pizza recipe and writes it to a file in the shared folder:
 
 ```python
 from deepagents import create_deep_agent
 from deepagents_docker import DockerSandbox
 
 backend = DockerSandbox(
-    workspace_dir="examples/data",
+    shared_dir="examples/data",
     allow_outbound_traffic=True,
 )
 
@@ -154,7 +145,7 @@ Contributions are welcome! Please feel free to open an issue or submit a pull re
 
 ## Security
 
-Use this for trusted workloads and development, not as a hard multi-tenant boundary. Do not put secrets in the workspace. See [Deep Agents security](https://github.com/langchain-ai/deepagents?tab=security-ov-file).
+Use this for trusted workloads and development, not as a hard multi-tenant boundary. Do not put secrets in the shared folder. See [Deep Agents security](https://github.com/langchain-ai/deepagents?tab=security-ov-file).
 
 ## License
 

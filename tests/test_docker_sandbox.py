@@ -1,7 +1,3 @@
-"""Unit tests for DockerSandbox (Docker CLI mocked)."""
-
-from __future__ import annotations
-
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -9,7 +5,7 @@ import pytest
 
 from deepagents_docker import DockerError, DockerSandbox
 from deepagents_docker._docker import DockerRunResult
-from deepagents_docker.backend import DEFAULT_IMAGE
+from deepagents_docker.backend import CONTAINER_WORKDIR, DEFAULT_IMAGE
 
 
 def _docker_run_ok() -> DockerRunResult:
@@ -34,16 +30,14 @@ def _make_run_docker_side_effect(**exec_config: object):
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="abc123container")
 def test_default_image_is_python_bookworm(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = _docker_run_ok()
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path)
+    sandbox = DockerSandbox(shared_dir=tmp_path)
     try:
         run_args = run_docker.call_args_list[0][0][0]
         assert DEFAULT_IMAGE in run_args
@@ -57,40 +51,38 @@ def test_default_image_is_python_bookworm(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="abc123container")
-def test_start_container_applies_security_flags(
-    _inspect: MagicMock,
+def test_start_container_mounts_shared_dir(
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = _docker_run_ok()
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path, image="test-image:local")
+    sandbox = DockerSandbox(shared_dir=tmp_path, image="test-image:local")
     try:
         run_args = run_docker.call_args_list[0][0][0]
         assert "run" in run_args
         assert "--network" in run_args and "bridge" in run_args
-        assert "--cap-drop" in run_args and "ALL" in run_args
-        assert "--read-only" in run_args
-        assert f"{tmp_path.resolve()}:/workspace:rw" in " ".join(run_args)
-        assert sandbox.id == "abc123container"
+        assert "--cap-drop" not in run_args
+        assert "--read-only" not in run_args
+        assert f"{tmp_path.resolve()}:{CONTAINER_WORKDIR}:rw" in run_args
+        workdir_index = run_args.index("-w")
+        assert run_args[workdir_index + 1] == CONTAINER_WORKDIR
+        assert len(sandbox.id) == 12
     finally:
         sandbox.close()
 
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_start_container_disables_outbound_traffic(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = _docker_run_ok()
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path, allow_outbound_traffic=False)
+    sandbox = DockerSandbox(shared_dir=tmp_path, allow_outbound_traffic=False)
     try:
         run_args = run_docker.call_args_list[0][0][0]
         network_index = run_args.index("--network")
@@ -101,9 +93,7 @@ def test_start_container_disables_outbound_traffic(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_start_container_applies_resource_limits_and_extra_args(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
@@ -111,7 +101,7 @@ def test_start_container_applies_resource_limits_and_extra_args(
     run_docker.return_value = _docker_run_ok()
 
     sandbox = DockerSandbox(
-        workspace_dir=tmp_path,
+        shared_dir=tmp_path,
         memory="1g",
         cpus=2.5,
         pids_limit=256,
@@ -127,36 +117,17 @@ def test_start_container_applies_resource_limits_and_extra_args(
         sandbox.close()
 
 
-@patch("deepagents_docker.backend.inspect_container_id")
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
 def test_raises_when_container_start_fails(
     _available: MagicMock,
     run_docker: MagicMock,
-    inspect: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = DockerRunResult(returncode=1, stdout="", stderr="image not found")
 
     with pytest.raises(DockerError, match="failed to start sandbox container: image not found"):
-        DockerSandbox(workspace_dir=tmp_path)
-
-    inspect.assert_not_called()
-
-
-@patch("deepagents_docker.backend.run_docker")
-@patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", side_effect=DockerError("inspect failed"))
-def test_raises_when_container_inspect_fails(
-    _inspect: MagicMock,
-    _available: MagicMock,
-    run_docker: MagicMock,
-    tmp_path: Path,
-) -> None:
-    run_docker.return_value = _docker_run_ok()
-
-    with pytest.raises(DockerError, match="inspect failed"):
-        DockerSandbox(workspace_dir=tmp_path)
+        DockerSandbox(shared_dir=tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -189,9 +160,7 @@ def test_docker_error_is_public_runtime_error() -> None:
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
-def test_execute_wraps_command_and_returns_output(
-    _inspect: MagicMock,
+def test_execute_runs_command_in_container(
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
@@ -200,26 +169,22 @@ def test_execute_wraps_command_and_returns_output(
         exec=DockerRunResult(returncode=0, stdout="hello\n", stderr=""),
     )
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path, image="test-image:local")
+    sandbox = DockerSandbox(shared_dir=tmp_path, image="test-image:local")
     try:
         result = sandbox.execute("echo hello")
         assert result.exit_code == 0
         assert "hello" in result.output
 
         exec_args = run_docker.call_args_list[1][0][0]
-        assert exec_args[:4] == ["exec", "-w", "/workspace", sandbox._container_name]
-        shell_cmd = exec_args[-1]
-        assert shell_cmd.startswith("cd /workspace && ")
-        assert "echo hello" in shell_cmd
+        assert exec_args[:2] == ["exec", sandbox._container_name]
+        assert exec_args[-1] == "echo hello"
     finally:
         sandbox.close()
 
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_execute_formats_stderr_and_nonzero_exit(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
@@ -228,7 +193,7 @@ def test_execute_formats_stderr_and_nonzero_exit(
         exec=DockerRunResult(returncode=2, stdout="", stderr="something broke\n"),
     )
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path)
+    sandbox = DockerSandbox(shared_dir=tmp_path)
     try:
         result = sandbox.execute("false")
         assert result.exit_code == 2
@@ -240,9 +205,7 @@ def test_execute_formats_stderr_and_nonzero_exit(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_execute_reports_no_output(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
@@ -251,7 +214,7 @@ def test_execute_reports_no_output(
         exec=DockerRunResult(returncode=0, stdout="", stderr=""),
     )
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path)
+    sandbox = DockerSandbox(shared_dir=tmp_path)
     try:
         result = sandbox.execute("true")
         assert result.output == "<no output>"
@@ -261,9 +224,7 @@ def test_execute_reports_no_output(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_execute_truncates_large_output(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
@@ -272,7 +233,7 @@ def test_execute_truncates_large_output(
         exec=DockerRunResult(returncode=0, stdout="x" * 200, stderr=""),
     )
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path, max_output_bytes=50)
+    sandbox = DockerSandbox(shared_dir=tmp_path, max_output_bytes=50)
     try:
         result = sandbox.execute("printf x")
         assert result.truncated is True
@@ -284,16 +245,14 @@ def test_execute_truncates_large_output(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_execute_rejects_empty_command(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = _docker_run_ok()
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path)
+    sandbox = DockerSandbox(shared_dir=tmp_path)
     try:
         result = sandbox.execute("")
         assert result.exit_code == 1
@@ -304,16 +263,14 @@ def test_execute_rejects_empty_command(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_execute_after_close_returns_error(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = _docker_run_ok()
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path)
+    sandbox = DockerSandbox(shared_dir=tmp_path)
     sandbox.close()
     result = sandbox.execute("echo hello")
     assert result.exit_code == 1
@@ -322,9 +279,7 @@ def test_execute_after_close_returns_error(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_execute_timeout_with_custom_message(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
@@ -333,7 +288,7 @@ def test_execute_timeout_with_custom_message(
         error=DockerError("docker command timed out after 1 seconds"),
     )
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path, timeout=1)
+    sandbox = DockerSandbox(shared_dir=tmp_path, timeout=1)
     try:
         result = sandbox.execute("sleep 10", timeout=1)
         assert result.exit_code == 124
@@ -344,9 +299,7 @@ def test_execute_timeout_with_custom_message(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_execute_timeout_with_default_message(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
@@ -355,7 +308,7 @@ def test_execute_timeout_with_default_message(
         error=DockerError("docker command timed out after 120 seconds"),
     )
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path)
+    sandbox = DockerSandbox(shared_dir=tmp_path)
     try:
         result = sandbox.execute("sleep 10")
         assert result.exit_code == 124
@@ -366,9 +319,7 @@ def test_execute_timeout_with_default_message(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_execute_when_docker_binary_missing(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
@@ -377,7 +328,7 @@ def test_execute_when_docker_binary_missing(
         error=DockerError("docker executable not found on PATH"),
     )
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path)
+    sandbox = DockerSandbox(shared_dir=tmp_path)
     try:
         result = sandbox.execute("echo hello")
         assert result.exit_code == 1
@@ -388,16 +339,14 @@ def test_execute_when_docker_binary_missing(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_execute_rejects_non_positive_timeout(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = _docker_run_ok()
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path)
+    sandbox = DockerSandbox(shared_dir=tmp_path)
     try:
         with pytest.raises(ValueError, match="timeout must be positive"):
             sandbox.execute("echo hello", timeout=0)
@@ -407,16 +356,14 @@ def test_execute_rejects_non_positive_timeout(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_write_and_read_via_virtual_paths(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = _docker_run_ok()
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path, image="test-image:local")
+    sandbox = DockerSandbox(shared_dir=tmp_path, image="test-image:local")
     try:
         write_result = sandbox.write("/notes.txt", "alpha\n")
         assert write_result.error is None
@@ -432,16 +379,14 @@ def test_write_and_read_via_virtual_paths(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_close_stops_and_removes_container(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = _docker_run_ok()
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path)
+    sandbox = DockerSandbox(shared_dir=tmp_path)
     container_name = sandbox._container_name
     sandbox.close()
 
@@ -453,16 +398,14 @@ def test_close_stops_and_removes_container(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_close_is_idempotent(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = _docker_run_ok()
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path)
+    sandbox = DockerSandbox(shared_dir=tmp_path)
     sandbox.close()
     sandbox.close()
 
@@ -471,16 +414,14 @@ def test_close_is_idempotent(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_close_skips_remove_when_auto_remove_disabled(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = _docker_run_ok()
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path, auto_remove=False)
+    sandbox = DockerSandbox(shared_dir=tmp_path, auto_remove=False)
     sandbox.close()
 
     assert len(run_docker.call_args_list) == 2
@@ -490,37 +431,33 @@ def test_close_skips_remove_when_auto_remove_disabled(
 @patch("deepagents_docker.backend.tempfile.mkdtemp")
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
-def test_close_removes_owned_workspace(
-    _inspect: MagicMock,
+def test_close_removes_owned_shared_dir(
     _available: MagicMock,
     run_docker: MagicMock,
     mkdtemp: MagicMock,
     tmp_path: Path,
 ) -> None:
-    workspace = tmp_path / "owned-workspace"
-    workspace.mkdir()
-    mkdtemp.return_value = str(workspace)
+    shared = tmp_path / "owned-shared"
+    shared.mkdir()
+    mkdtemp.return_value = str(shared)
     run_docker.return_value = _docker_run_ok()
 
     sandbox = DockerSandbox()
     sandbox.close()
 
-    assert not workspace.exists()
+    assert not shared.exists()
 
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
-def test_close_preserves_user_workspace(
-    _inspect: MagicMock,
+def test_close_preserves_user_shared_dir(
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = _docker_run_ok()
 
-    sandbox = DockerSandbox(workspace_dir=tmp_path)
+    sandbox = DockerSandbox(shared_dir=tmp_path)
     sandbox.close()
 
     assert tmp_path.exists()
@@ -528,16 +465,14 @@ def test_close_preserves_user_workspace(
 
 @patch("deepagents_docker.backend.run_docker")
 @patch("deepagents_docker.backend.docker_available", return_value=True)
-@patch("deepagents_docker.backend.inspect_container_id", return_value="cid")
 def test_context_manager_closes_sandbox(
-    _inspect: MagicMock,
     _available: MagicMock,
     run_docker: MagicMock,
     tmp_path: Path,
 ) -> None:
     run_docker.return_value = _docker_run_ok()
 
-    with DockerSandbox(workspace_dir=tmp_path) as sandbox:
-        assert sandbox.id == "cid"
+    with DockerSandbox(shared_dir=tmp_path) as sandbox:
+        assert len(sandbox.id) == 12
 
     assert len(run_docker.call_args_list) == 3
