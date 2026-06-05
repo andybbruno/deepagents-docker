@@ -10,6 +10,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
+[![Downloads](https://img.shields.io/pepy/dt/deepagents-docker)](https://pypistats.org/packages/deepagents-docker)
 [![deepagents](https://img.shields.io/badge/built%20for-deepagents-orange)](https://github.com/langchain-ai/deepagents)
 
 </div>
