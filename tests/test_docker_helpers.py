@@ -77,3 +77,77 @@ def test_run_docker_raises_when_docker_missing(subprocess_run: MagicMock) -> Non
 
     with pytest.raises(DockerError, match="not found on PATH"):
         run_docker(["info"])
+
+
+def _fake_docker_script(body: str) -> list[str]:
+    """Build args that make the patched `docker` binary run a python snippet."""
+    return ["-c", body]
+
+
+@patch("deepagents_docker._docker.subprocess.Popen")
+def test_run_docker_capped_raises_when_docker_missing(popen: MagicMock) -> None:
+    popen.side_effect = FileNotFoundError
+
+    with pytest.raises(DockerError, match="not found on PATH"):
+        run_docker(["info"], max_output_bytes=1024)
+
+
+def test_run_docker_capped_returns_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "deepagents_docker._docker.subprocess.Popen",
+        _popen_shim(["sh", "-c", "printf hello; printf oops >&2"]),
+    )
+
+    result = run_docker(["exec", "cid", "true"], max_output_bytes=1024)
+
+    assert result.returncode == 0
+    assert result.stdout == "hello"
+    assert result.stderr == "oops"
+    assert result.truncated is False
+
+
+def test_run_docker_capped_kills_process_on_unbounded_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `yes` writes forever; the cap must stop us long before the host buffers it all.
+    monkeypatch.setattr(
+        "deepagents_docker._docker.subprocess.Popen",
+        _popen_shim(["sh", "-c", "yes aaaaaaaaaaaaaaaa"]),
+    )
+
+    result = run_docker(["exec", "cid", "true"], timeout=30, max_output_bytes=4096)
+
+    assert result.truncated is True
+    assert len(result.stdout.encode()) == 4096
+    assert result.returncode != 0
+
+
+def test_run_docker_capped_forwards_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "deepagents_docker._docker.subprocess.Popen",
+        _popen_shim(["sh", "-c", "cat"]),
+    )
+
+    result = run_docker(["exec", "-i", "cid", "cat"], input_text="ping", max_output_bytes=1024)
+
+    assert result.stdout == "ping"
+
+
+def test_run_docker_capped_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "deepagents_docker._docker.subprocess.Popen",
+        _popen_shim(["sh", "-c", "sleep 30"]),
+    )
+
+    with pytest.raises(DockerError, match="timed out after 1 seconds"):
+        run_docker(["exec", "cid", "sleep"], timeout=1, max_output_bytes=1024)
+
+
+def _popen_shim(replacement: list[str]):
+    """Replace the `docker ...` argv with a real local command, keeping Popen behavior."""
+    real_popen = subprocess.Popen
+
+    def _factory(_args: list[str], **kwargs: object) -> subprocess.Popen:
+        return real_popen(replacement, **kwargs)
+
+    return _factory

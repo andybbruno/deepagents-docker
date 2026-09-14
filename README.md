@@ -54,7 +54,8 @@ DockerSandbox(
     allow_outbound_traffic=True,       # False → no network; True (default) → allow outbound traffic
     shared_dir="/path/to/project",     # host folder shared with the container; see note below
     timeout=120,                       # per-command timeout (seconds)
-    max_output_bytes=100_000,          # combined stdout/stderr cap per command
+    max_output_bytes=100_000,          # per-stream stdout/stderr cap; output is streamed
+                                       # and the command is killed once it is reached
     memory="256m",                     # default memory limit
     cpus=0.5,                          # default CPU limit
     pids_limit=128,

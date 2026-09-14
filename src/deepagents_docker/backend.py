@@ -3,6 +3,9 @@ from __future__ import annotations
 import atexit
 import tempfile
 import uuid
+import weakref
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 from deepagents.backends.filesystem import FilesystemBackend
@@ -18,6 +21,36 @@ from .errors import DockerError
 DEFAULT_EXECUTE_TIMEOUT = 120
 DEFAULT_IMAGE = "python:3.12-bookworm"
 CONTAINER_WORKDIR = "/shared"
+DOCKER_INFO_TIMEOUT = 30
+DOCKER_START_TIMEOUT = 600
+CLEANUP_TIMEOUT = 15
+
+# `docker exec` makes each exec its own session/process-group leader, so the wrapper records
+# its PID (== the process group id) and a later `kill -9 -<pgid>` reaps the whole tree,
+# including children reparented to PID 1. $1 is the pid file, $2 the user command.
+_EXEC_WRAPPER = """
+echo $$ > "$1" 2>/dev/null
+sh -c "$2"
+status=$?
+rm -f "$1" 2>/dev/null
+exit $status
+"""
+
+# Kill the process group recorded by `_EXEC_WRAPPER`. $1 is the pid file.
+_KILL_WRAPPER = """
+pgid=""
+[ -f "$1" ] && read pgid < "$1"
+rm -f "$1" 2>/dev/null
+[ -n "$pgid" ] && kill -9 -"$pgid" 2>/dev/null
+exit 0
+"""
+
+
+def _atexit_close(ref: weakref.ReferenceType[DockerSandbox]) -> None:
+    """Close a sandbox at interpreter exit without keeping it alive until then."""
+    sandbox = ref()
+    if sandbox is not None:
+        sandbox.close()
 
 
 class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
@@ -45,7 +78,9 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
             shared_dir: Host directory shared with the container. A temporary directory is
                 created when omitted.
             timeout: Default command timeout in seconds.
-            max_output_bytes: Maximum combined stdout/stderr captured per command.
+            max_output_bytes: Maximum stdout/stderr captured per command. Output is streamed
+                and the command is killed once a stream reaches this cap, so a command writing
+                unbounded output cannot exhaust host memory.
             memory: Docker memory limit (for example ``"256m"``).
             cpus: Docker CPU limit.
             pids_limit: Maximum number of PIDs inside the container.
@@ -60,6 +95,9 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
             raise ValueError(msg)
         if pids_limit <= 0:
             msg = f"pids_limit must be positive, got {pids_limit}"
+            raise ValueError(msg)
+        if max_output_bytes <= 0:
+            msg = f"max_output_bytes must be positive, got {max_output_bytes}"
             raise ValueError(msg)
 
         self._owns_shared_dir = shared_dir is None
@@ -85,9 +123,11 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
         self._container_id: str = f"{uuid.uuid4().hex[:12]}"
         self._container_name = f"deepagents-docker-{self._container_id}"
         self._closed = False
+        self._atexit_hook: Callable[[], None] | None = None
 
         self._start_container()
-        atexit.register(self.close)
+        self._atexit_hook = partial(_atexit_close, weakref.ref(self))
+        atexit.register(self._atexit_hook)
 
     @property
     def shared_dir(self) -> Path:
@@ -100,7 +140,7 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
         return self._container_id
 
     def _start_container(self) -> None:
-        if not docker_available():
+        if not docker_available(timeout=DOCKER_INFO_TIMEOUT):
             msg = (
                 "Docker is not available. Install Docker, ensure the daemon is running, "
                 f"and pull the default image with `docker pull {DEFAULT_IMAGE}`"
@@ -110,6 +150,9 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
         run_args = [
             "run",
             "-d",
+            # Docker's init process reaps orphaned children, so killed commands do not
+            # pile up as zombies against `--pids-limit`.
+            "--init",
             "--name",
             self._container_name,
             "--network",
@@ -129,10 +172,34 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
             "sleep",
             "infinity",
         ]
-        result = run_docker(run_args)
+        try:
+            result = run_docker(run_args, timeout=DOCKER_START_TIMEOUT)
+        except DockerError:
+            # A timed-out `docker run` may still have created the container.
+            self._force_remove_container()
+            raise
         if result.returncode != 0:
+            self._force_remove_container()
             msg = format_docker_error(result)
             raise DockerError(f"failed to start sandbox container: {msg}")
+
+    def _force_remove_container(self) -> None:
+        """Best-effort `docker rm -f`, used on failed startup and on close."""
+        try:
+            run_docker(["rm", "-f", self._container_name], timeout=CLEANUP_TIMEOUT)
+        except DockerError:
+            pass
+
+    def _kill_exec_group(self, pid_file: str) -> None:
+        """Kill the in-container process group left behind by a timed-out/killed exec."""
+        try:
+            run_docker(
+                ["exec", self._container_name, "sh", "-c", _KILL_WRAPPER, "sh", pid_file],
+                timeout=CLEANUP_TIMEOUT,
+                max_output_bytes=4096,
+            )
+        except DockerError:
+            pass
 
     def execute(
         self,
@@ -160,19 +227,31 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
             msg = f"timeout must be positive, got {effective_timeout}"
             raise ValueError(msg)
 
+        pid_file = f"/tmp/.deepagents-exec-{uuid.uuid4().hex}"  # noqa: S108
         docker_args = [
             "exec",
             self._container_name,
             "sh",
             "-c",
+            _EXEC_WRAPPER,
+            "sh",
+            pid_file,
             command,
         ]
 
         try:
-            completed = run_docker(docker_args, timeout=effective_timeout)
+            completed = run_docker(
+                docker_args,
+                timeout=effective_timeout,
+                max_output_bytes=self._max_output_bytes,
+            )
         except DockerError as exc:
             detail = str(exc)
             if "timed out" in detail:
+                # Killing the `docker exec` client leaves the command running in the
+                # container; reap its process group so it cannot burn the container's
+                # CPU/PID budget forever.
+                self._kill_exec_group(pid_file)
                 if timeout is not None:
                     msg = (
                         f"Error: Command timed out after {effective_timeout} seconds "
@@ -199,6 +278,9 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
                 truncated=False,
             )
 
+        if completed.truncated:
+            self._kill_exec_group(pid_file)
+
         output_parts: list[str] = []
         if completed.stdout:
             output_parts.append(completed.stdout)
@@ -207,11 +289,14 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
             output_parts.extend(f"[stderr] {line}" for line in stderr_lines)
 
         output = "\n".join(output_parts) if output_parts else "<no output>"
-        truncated = False
+        truncated = completed.truncated
         if len(output) > self._max_output_bytes:
             output = output[: self._max_output_bytes]
-            output += f"\n\n... Output truncated at {self._max_output_bytes} bytes."
             truncated = True
+        if truncated:
+            output += f"\n\n... Output truncated at {self._max_output_bytes} bytes."
+        if completed.truncated:
+            output += " The command was terminated after exceeding the output limit."
 
         if completed.returncode != 0:
             output = f"{output.rstrip()}\n\nExit code: {completed.returncode}"
@@ -228,13 +313,17 @@ class DockerSandbox(FilesystemBackend, SandboxBackendProtocol):
             return
         self._closed = True
 
-        stop = run_docker(["stop", "-t", "2", self._container_name], timeout=30)
-        if stop.returncode != 0 and "No such container" not in stop.stderr:
-            # Best-effort shutdown; container may already be gone.
+        if self._atexit_hook is not None:
+            atexit.unregister(self._atexit_hook)
+
+        # Best-effort shutdown; the container may already be gone.
+        try:
+            run_docker(["stop", "-t", "2", self._container_name], timeout=30)
+        except DockerError:
             pass
 
         if self._auto_remove:
-            run_docker(["rm", "-f", self._container_name], timeout=30)
+            self._force_remove_container()
 
         if self._owns_shared_dir:
             import shutil
