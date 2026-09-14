@@ -1,3 +1,5 @@
+import gc
+import weakref
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -136,6 +138,7 @@ def test_raises_when_container_start_fails(
         ({"timeout": 0}, "timeout must be positive"),
         ({"cpus": 0}, "cpus must be positive"),
         ({"pids_limit": -1}, "pids_limit must be positive"),
+        ({"max_output_bytes": 0}, "max_output_bytes must be positive"),
     ],
 )
 @patch("deepagents_docker.backend.docker_available", return_value=True)
@@ -476,3 +479,121 @@ def test_context_manager_closes_sandbox(
         assert len(sandbox.id) == 12
 
     assert len(run_docker.call_args_list) == 3
+
+
+def _exec_calls(run_docker: MagicMock) -> list[list[str]]:
+    return [call[0][0] for call in run_docker.call_args_list if call[0][0][0] == "exec"]
+
+
+@patch("deepagents_docker.backend.run_docker")
+@patch("deepagents_docker.backend.docker_available", return_value=True)
+def test_container_runs_with_init_process(
+    _available: MagicMock,
+    run_docker: MagicMock,
+    tmp_path: Path,
+) -> None:
+    run_docker.return_value = _docker_run_ok()
+
+    sandbox = DockerSandbox(shared_dir=tmp_path)
+    try:
+        assert "--init" in run_docker.call_args_list[0][0][0]
+    finally:
+        sandbox.close()
+
+
+@patch("deepagents_docker.backend.run_docker")
+@patch("deepagents_docker.backend.docker_available", return_value=True)
+def test_failed_start_removes_container(
+    _available: MagicMock,
+    run_docker: MagicMock,
+    tmp_path: Path,
+) -> None:
+    run_docker.return_value = DockerRunResult(returncode=1, stdout="", stderr="boom")
+
+    with pytest.raises(DockerError):
+        DockerSandbox(shared_dir=tmp_path)
+
+    assert any(call[0][0][:2] == ["rm", "-f"] for call in run_docker.call_args_list)
+
+
+@patch("deepagents_docker.backend.run_docker")
+@patch("deepagents_docker.backend.docker_available", return_value=True)
+def test_execute_caps_output_at_the_source(
+    _available: MagicMock,
+    run_docker: MagicMock,
+    tmp_path: Path,
+) -> None:
+    run_docker.side_effect = _make_run_docker_side_effect()
+
+    sandbox = DockerSandbox(shared_dir=tmp_path, max_output_bytes=4096)
+    try:
+        sandbox.execute("echo hi")
+        exec_kwargs = run_docker.call_args_list[1][1]
+        assert exec_kwargs["max_output_bytes"] == 4096
+    finally:
+        sandbox.close()
+
+
+@patch("deepagents_docker.backend.run_docker")
+@patch("deepagents_docker.backend.docker_available", return_value=True)
+def test_execute_reaps_process_group_after_timeout(
+    _available: MagicMock,
+    run_docker: MagicMock,
+    tmp_path: Path,
+) -> None:
+    run_docker.side_effect = _make_run_docker_side_effect(
+        error=DockerError("docker command timed out after 1 seconds"),
+    )
+
+    sandbox = DockerSandbox(shared_dir=tmp_path)
+    try:
+        result = sandbox.execute("sleep 100", timeout=1)
+        assert result.exit_code == 124
+
+        command_exec, cleanup_exec = _exec_calls(run_docker)
+        pid_file = command_exec[-2]
+        assert pid_file.startswith("/tmp/.deepagents-exec-")
+        assert "kill -9" in cleanup_exec[4]
+        assert cleanup_exec[-1] == pid_file
+    finally:
+        sandbox.close()
+
+
+@patch("deepagents_docker.backend.run_docker")
+@patch("deepagents_docker.backend.docker_available", return_value=True)
+def test_execute_reaps_process_group_when_output_capped(
+    _available: MagicMock,
+    run_docker: MagicMock,
+    tmp_path: Path,
+) -> None:
+    run_docker.side_effect = _make_run_docker_side_effect(
+        exec=DockerRunResult(returncode=-9, stdout="x" * 60, stderr="", truncated=True),
+    )
+
+    sandbox = DockerSandbox(shared_dir=tmp_path, max_output_bytes=50)
+    try:
+        result = sandbox.execute("yes")
+        assert result.truncated is True
+        assert "terminated after exceeding the output limit" in result.output
+
+        command_exec, cleanup_exec = _exec_calls(run_docker)
+        assert "kill -9" in cleanup_exec[4]
+        assert cleanup_exec[-1] == command_exec[-2]
+    finally:
+        sandbox.close()
+
+
+@patch("deepagents_docker.backend.run_docker")
+@patch("deepagents_docker.backend.docker_available", return_value=True)
+def test_abandoned_sandbox_is_not_kept_alive_by_atexit(
+    _available: MagicMock,
+    run_docker: MagicMock,
+    tmp_path: Path,
+) -> None:
+    run_docker.return_value = _docker_run_ok()
+
+    ref = weakref.ref(DockerSandbox(shared_dir=tmp_path))
+    gc.collect()
+
+    assert ref() is None
+    assert any(call[0][0][:2] == ["rm", "-f"] for call in run_docker.call_args_list)
